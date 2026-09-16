@@ -1,7 +1,10 @@
 // Sonia's birthday tracker - live-ish status client.
-// Reads ONLY {stop, note, updated} from the tiny backend. No GPS, no history.
-const BACKEND = (typeof window.TRACKER_BACKEND === 'string' && window.TRACKER_BACKEND.startsWith('https://'))
-  ? window.TRACKER_BACKEND
+// Reads ONLY {stop, note, updated} from a link-shared Google Sheet (row 2). No GPS, no history.
+const SHEET_ID = (typeof window.TRACKER_SHEET_ID === 'string' && window.TRACKER_SHEET_ID.length > 10)
+  ? window.TRACKER_SHEET_ID
+  : null;
+const GVIZ_URL = SHEET_ID
+  ? 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:json&headers=1'
   : null;
 
 const DEFAULTS = {
@@ -55,30 +58,48 @@ function render(d) {
     return;
   }
   nameEl.textContent = d.stop;
-  noteEl.textContent = d.note || STOP_NOTES[d.stop] || "Latest public stop, posted by Sonia.";
+  noteEl.textContent = d.note || STOP_NOTES[d.stop] || "Latest public stop, confirmed by Sonia.";
   updEl.textContent = "Updated " + relTime(d.updated);
   markRoute(d.stop);
 }
 
-async function load() {
-  if (!BACKEND) { render(null); return; }
+function extract(g) {
   try {
-    const r = await fetch(BACKEND + (BACKEND.includes('?') ? '&' : '?') + 'path=status&cb=' + Date.now(), { redirect: 'follow' });
+    const rows = g.table.rows || [];
+    if (!rows.length) return null;
+    const c = rows[0].c || [];
+    return {
+      stop: (c[0] && c[0].v) || "",
+      note: (c[1] && c[1].v) || "",
+      updated: (c[2] && c[2].v) || ""
+    };
+  } catch (e) { return null; }
+}
+
+async function load() {
+  if (!GVIZ_URL) { render(null); return; }
+  const url = GVIZ_URL + '&cb=' + Date.now();
+  try {
+    const r = await fetch(url, { redirect: 'follow' });
     if (!r.ok) throw new Error('bad status');
-    render(await r.json());
+    const text = await r.text();
+    const start = text.indexOf('setResponse(');
+    if (start === -1) throw new Error('unexpected payload');
+    const json = text.slice(start + 12, text.lastIndexOf(')'));
+    render(extract(JSON.parse(json)));
   } catch (e) {
-    // JSONP fallback if CORS is blocked
+    // Script-tag fallback if CORS is blocked
     try {
-      const d = await new Promise((resolve, reject) => {
-        const cb = 'trackerJsonp' + Math.floor(Math.random() * 1e9);
-        window[cb] = resolve;
+      const g = await new Promise((resolve, reject) => {
+        window.google = window.google || {};
+        window.google.visualization = { Query: { setResponse: resolve } };
         const s = document.createElement('script');
-        s.src = BACKEND + (BACKEND.includes('?') ? '&' : '?') + 'path=status&callback=' + cb + '&cb=' + Date.now();
+        s.src = url;
         s.onerror = reject;
         document.head.appendChild(s);
         setTimeout(() => reject(new Error('timeout')), 8000);
       });
-      render(d);
+      render(extract(g));
     } catch (e2) { render(null); }
   }
 }
